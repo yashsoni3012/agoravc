@@ -291,7 +291,7 @@ window.addEventListener("beforeunload", () => {
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Agora Live - Multiple Unique Users</title>
+  <title>Agora Live - Reliable Multi‑User</title>
   <style>
     body { font-family: Arial, sans-serif; padding: 20px; background: #f5f5f5; }
     button { margin: 5px; padding: 10px 20px; font-size: 14px; cursor: pointer; border: none; border-radius: 4px; background: #007bff; color: white; }
@@ -335,10 +335,11 @@ window.addEventListener("beforeunload", () => {
 </head>
 <body>
 
-<h2>🎥 Multi‑User Video Call (Unique UIDs)</h2>
+<h2>🎥 Multi‑User Video Call (Auto‑Reconnect)</h2>
 <div class="info">
   <strong>Channel name:</strong> <span id="channelName">(not joined)</span><br>
-  <strong>My UID:</strong> <span id="myUid">-</span>
+  <strong>My UID:</strong> <span id="myUid">-</span><br>
+  <strong>Connection state:</strong> <span id="connState">DISCONNECTED</span>
 </div>
 
 <div>
@@ -367,8 +368,11 @@ const API_BASE = "https://celebstalks.pythonanywhere.com/";
 let client = AgoraRTC.createClient({ mode: "live", codec: "vp8" });
 let localTracks = [];
 let currentChannel = null;
+let currentUid = null;
+let currentToken = null;
 let isJoining = false;
 let remoteUsers = new Map(); // uid -> { div, videoTrack, audioTrack }
+let reconnectAttempts = 0;
 
 // Helper: log to console + on‑screen panel
 function addLog(msg) {
@@ -387,7 +391,6 @@ function clearRemoteVideos() {
   remoteUsers.clear();
 }
 
-// Create a div for a remote user
 function addRemoteVideo(uid) {
   const container = document.getElementById("remote-videos");
   let div = document.createElement("div");
@@ -407,7 +410,60 @@ function removeRemoteVideo(uid) {
   }
 }
 
-// Safely join/leave to avoid conflicts
+// Monitor connection state
+client.on("connection-state-change", (cur, prev, reason) => {
+  addLog(`🔌 Connection state: ${prev} → ${cur} (${reason || 'no reason'})`);
+  document.getElementById("connState").innerText = cur;
+  if (cur === "DISCONNECTED" && currentChannel && !isJoining) {
+    addLog("⚠️ Unexpected disconnect, attempting to reconnect...");
+    reconnect();
+  }
+});
+
+async function reconnect() {
+  if (reconnectAttempts > 3) {
+    addLog("❌ Max reconnection attempts reached. Please manually rejoin.");
+    return;
+  }
+  reconnectAttempts++;
+  addLog(`🔄 Reconnect attempt ${reconnectAttempts}...`);
+  try {
+    // Request a fresh token
+    const isHost = (currentUid === 1);
+    let data;
+    if (isHost) {
+      const res = await fetch(API_BASE + "live_stream_token/", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ influencer_id: 1 })
+      });
+      data = await res.json();
+    } else {
+      const res = await fetch(API_BASE + "join_live_stream/", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user_id: currentUid, channel_name: currentChannel })
+      });
+      data = await res.json();
+    }
+    if (data.token) {
+      await client.join(APP_ID, currentChannel, data.token, currentUid);
+      addLog("✅ Reconnected successfully");
+      reconnectAttempts = 0;
+      // Republish local tracks if they exist
+      if (localTracks.length) {
+        await client.publish(localTracks);
+      }
+    } else {
+      throw new Error("No token from server");
+    }
+  } catch (err) {
+    addLog(`❌ Reconnect failed: ${err.message}`);
+    setTimeout(reconnect, 5000);
+  }
+}
+
+// Safely join/leave
 async function safeJoin(callback) {
   if (isJoining) {
     addLog("⚠️ Already joining, please wait...");
@@ -416,11 +472,12 @@ async function safeJoin(callback) {
   isJoining = true;
   try {
     if (client.connectionState !== "DISCONNECTED") {
-      addLog("⚠️ Leaving previous session before new join...");
+      addLog("⚠️ Leaving previous session...");
       await client.leave();
       clearRemoteVideos();
     }
     await callback();
+    reconnectAttempts = 0;
   } catch (err) {
     addLog(`❌ Error: ${err.message}`);
     alert("Action failed: " + err.message);
@@ -429,64 +486,62 @@ async function safeJoin(callback) {
   }
 }
 
-// ------------------- Start as Host (UID = 1) -------------------
+// ------------------- Start as Host -------------------
 async function startLive() {
   safeJoin(async () => {
-    addLog("📡 Requesting token for host (influencer_id=1)...");
+    addLog("📡 Requesting token for host...");
     const res = await fetch(API_BASE + "live_stream_token/", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ influencer_id: 1 })
     });
     const data = await res.json();
-    addLog(`🎯 Host token response: ${JSON.stringify(data)}`);
-    if (!data.token || !data.channel_name) {
-      throw new Error("Invalid token response from server");
-    }
+    addLog(`🎯 Host token: ${JSON.stringify(data)}`);
+    if (!data.token || !data.channel_name) throw new Error("Invalid token");
     currentChannel = data.channel_name;
+    currentUid = data.uid;
+    currentToken = data.token;
     document.getElementById("channelName").innerText = currentChannel;
-    document.getElementById("myUid").innerText = data.uid;
+    document.getElementById("myUid").innerText = currentUid;
 
     await client.setClientRole("host");
-    await client.join(APP_ID, currentChannel, data.token, data.uid);
-    addLog(`✅ Joined channel ${currentChannel} as HOST (UID ${data.uid})`);
+    await client.join(APP_ID, currentChannel, currentToken, currentUid);
+    addLog(`✅ Joined as HOST (${currentUid})`);
 
     const [audioTrack, videoTrack] = await AgoraRTC.createMicrophoneAndCameraTracks();
     localTracks = [audioTrack, videoTrack];
     videoTrack.play("local-player");
     await client.publish(localTracks);
-    addLog("🎥 Published local video & audio");
+    addLog("🎥 Published local tracks");
   });
 }
 
-// ------------------- Join as Audience (UNIQUE UID) -------------------
+// ------------------- Join as Audience -------------------
 async function joinAsPublisher() {
-  const channel = prompt("Enter channel name (same as Host's channel):");
+  const channel = prompt("Enter channel name:");
   if (!channel) return;
-
-  // 🔥 Generate a unique UID for this audience member (random between 1000 and 9999)
   const uniqueUid = Math.floor(Math.random() * 9000) + 1000;
-  addLog(`🔑 Using unique UID: ${uniqueUid}`);
+  addLog(`🔑 Using UID: ${uniqueUid}`);
 
   safeJoin(async () => {
-    addLog(`📡 Requesting token for user_id=${uniqueUid} on channel "${channel}"...`);
+    addLog(`📡 Requesting token for UID ${uniqueUid}...`);
     const res = await fetch(API_BASE + "join_live_stream/", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ user_id: uniqueUid, channel_name: channel })
     });
     const data = await res.json();
-    addLog(`🎯 Join token response: ${JSON.stringify(data)}`);
-    if (!data.token || !data.channel_name) {
-      throw new Error("Invalid join response from server");
-    }
+    addLog(`🎯 Join response: ${JSON.stringify(data)}`);
+    if (!data.token || !data.channel_name) throw new Error("Invalid response");
     currentChannel = data.channel_name;
+    currentUid = data.uid;
+    currentToken = data.token;
     document.getElementById("channelName").innerText = currentChannel;
-    document.getElementById("myUid").innerText = data.uid;
+    document.getElementById("myUid").innerText = currentUid;
 
     await client.setClientRole("host");
-    await client.join(APP_ID, currentChannel, data.token, data.uid);
-    addLog(`✅ Joined channel ${currentChannel} as PUBLISHER (UID ${data.uid})`);
+    await client.join(APP_ID, currentChannel, currentToken, currentUid);
+    addLog(`✅ Joined as PUBLISHER (${currentUid})`);
 
     const [audioTrack, videoTrack] = await AgoraRTC.createMicrophoneAndCameraTracks();
     localTracks = [audioTrack, videoTrack];
@@ -496,48 +551,42 @@ async function joinAsPublisher() {
   });
 }
 
-// ------------------- Remote user events (supports many) -------------------
+// ------------------- Remote events -------------------
 client.on("user-published", async (user, mediaType) => {
-  addLog(`📡 Remote user ${user.uid} published ${mediaType}`);
+  addLog(`📡 Remote ${user.uid} published ${mediaType}`);
   try {
     await client.subscribe(user, mediaType);
-    addLog(`✅ Subscribed to ${user.uid} ${mediaType}`);
-
-    let remoteEntry = remoteUsers.get(user.uid);
-    if (!remoteEntry && mediaType === "video") {
+    let entry = remoteUsers.get(user.uid);
+    if (!entry && mediaType === "video") {
       addRemoteVideo(user.uid);
-      remoteEntry = remoteUsers.get(user.uid);
+      entry = remoteUsers.get(user.uid);
     }
-
-    if (mediaType === "video" && remoteEntry && remoteEntry.div) {
-      user.videoTrack.play(remoteEntry.div.id);
-      remoteEntry.videoTrack = user.videoTrack;
+    if (mediaType === "video" && entry && entry.div) {
+      user.videoTrack.play(entry.div.id);
+      entry.videoTrack = user.videoTrack;
       addLog(`▶️ Playing video from ${user.uid}`);
     }
-
     if (mediaType === "audio") {
       user.audioTrack.play();
-      if (remoteEntry) remoteEntry.audioTrack = user.audioTrack;
+      if (entry) entry.audioTrack = user.audioTrack;
       addLog(`🔊 Playing audio from ${user.uid}`);
     }
   } catch (err) {
-    addLog(`❌ Error subscribing to ${user.uid}: ${err.message}`);
+    addLog(`❌ Subscribe error: ${err.message}`);
   }
 });
 
 client.on("user-unpublished", (user, mediaType) => {
-  addLog(`🔇 Remote user ${user.uid} unpublished ${mediaType}`);
+  addLog(`🔇 Remote ${user.uid} unpublished ${mediaType}`);
   if (mediaType === "video") {
     const entry = remoteUsers.get(user.uid);
-    if (entry && entry.videoTrack) {
-      entry.videoTrack.stop();
-    }
+    if (entry && entry.videoTrack) entry.videoTrack.stop();
     removeRemoteVideo(user.uid);
   }
 });
 
 client.on("user-left", (user) => {
-  addLog(`🚪 Remote user ${user.uid} left the channel`);
+  addLog(`🚪 Remote ${user.uid} left`);
   removeRemoteVideo(user.uid);
 });
 
@@ -545,28 +594,24 @@ client.on("user-joined", (user) => {
   addLog(`👋 New user joined: ${user.uid}`);
 });
 
-// ------------------- Leave everything -------------------
+// ------------------- Leave -------------------
 async function leaveStream() {
   try {
-    addLog("🛑 Leaving stream...");
+    addLog("🛑 Leaving...");
     if (localTracks.length) {
-      localTracks.forEach(track => {
-        track.stop();
-        track.close();
-      });
+      localTracks.forEach(t => { t.stop(); t.close(); });
       localTracks = [];
     }
-    if (client.connectionState !== "DISCONNECTED") {
-      await client.leave();
-    }
+    if (client.connectionState !== "DISCONNECTED") await client.leave();
     clearRemoteVideos();
     const localDiv = document.getElementById("local-player");
     const oldVideo = localDiv.querySelector("video");
     if (oldVideo) oldVideo.remove();
     currentChannel = null;
+    currentUid = null;
     document.getElementById("channelName").innerText = "(not joined)";
     document.getElementById("myUid").innerText = "-";
-    addLog("✅ Left successfully");
+    addLog("✅ Left");
   } catch (err) {
     addLog(`❌ Leave error: ${err.message}`);
   }
