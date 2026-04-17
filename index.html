@@ -291,7 +291,7 @@ window.addEventListener("beforeunload", () => {
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Agora Live - Multi‑User Video Call</title>
+  <title>Agora Live - Multiple Unique Users</title>
   <style>
     body { font-family: Arial, sans-serif; padding: 20px; background: #f5f5f5; }
     button { margin: 5px; padding: 10px 20px; font-size: 14px; cursor: pointer; border: none; border-radius: 4px; background: #007bff; color: white; }
@@ -335,15 +335,15 @@ window.addEventListener("beforeunload", () => {
 </head>
 <body>
 
-<h2>🎥 Multi‑User Video Call (All can publish)</h2>
+<h2>🎥 Multi‑User Video Call (Unique UIDs)</h2>
 <div class="info">
   <strong>Channel name:</strong> <span id="channelName">(not joined)</span><br>
   <strong>My UID:</strong> <span id="myUid">-</span>
 </div>
 
 <div>
-  <button onclick="startLive()">🎬 Start as Host</button>
-  <button onclick="joinAsPublisher()">👥 Join as Publisher</button>
+  <button onclick="startLive()">🎬 Start as Host (UID 1)</button>
+  <button onclick="joinAsPublisher()">👥 Join as Audience (unique UID)</button>
   <button onclick="leaveStream()">❌ Leave Call</button>
 </div>
 
@@ -429,7 +429,7 @@ async function safeJoin(callback) {
   }
 }
 
-// ------------------- Start as Host (publisher) -------------------
+// ------------------- Start as Host (UID = 1) -------------------
 async function startLive() {
   safeJoin(async () => {
     addLog("📡 Requesting token for host (influencer_id=1)...");
@@ -447,12 +447,10 @@ async function startLive() {
     document.getElementById("channelName").innerText = currentChannel;
     document.getElementById("myUid").innerText = data.uid;
 
-    // Force role = "host" (allows publishing)
     await client.setClientRole("host");
     await client.join(APP_ID, currentChannel, data.token, data.uid);
     addLog(`✅ Joined channel ${currentChannel} as HOST (UID ${data.uid})`);
 
-    // Create local tracks
     const [audioTrack, videoTrack] = await AgoraRTC.createMicrophoneAndCameraTracks();
     localTracks = [audioTrack, videoTrack];
     videoTrack.play("local-player");
@@ -461,17 +459,21 @@ async function startLive() {
   });
 }
 
-// ------------------- Join as Publisher (anyone else) -------------------
+// ------------------- Join as Audience (UNIQUE UID) -------------------
 async function joinAsPublisher() {
   const channel = prompt("Enter channel name (same as Host's channel):");
   if (!channel) return;
 
+  // 🔥 Generate a unique UID for this audience member (random between 1000 and 9999)
+  const uniqueUid = Math.floor(Math.random() * 9000) + 1000;
+  addLog(`🔑 Using unique UID: ${uniqueUid}`);
+
   safeJoin(async () => {
-    addLog(`📡 Requesting token for user_id=2 on channel "${channel}"...`);
+    addLog(`📡 Requesting token for user_id=${uniqueUid} on channel "${channel}"...`);
     const res = await fetch(API_BASE + "join_live_stream/", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ user_id: 2, channel_name: channel })
+      body: JSON.stringify({ user_id: uniqueUid, channel_name: channel })
     });
     const data = await res.json();
     addLog(`🎯 Join token response: ${JSON.stringify(data)}`);
@@ -482,12 +484,10 @@ async function joinAsPublisher() {
     document.getElementById("channelName").innerText = currentChannel;
     document.getElementById("myUid").innerText = data.uid;
 
-    // ** CRUCIAL: set role to HOST so we can publish video **
     await client.setClientRole("host");
     await client.join(APP_ID, currentChannel, data.token, data.uid);
     addLog(`✅ Joined channel ${currentChannel} as PUBLISHER (UID ${data.uid})`);
 
-    // Create and publish local tracks
     const [audioTrack, videoTrack] = await AgoraRTC.createMicrophoneAndCameraTracks();
     localTracks = [audioTrack, videoTrack];
     videoTrack.play("local-player");
@@ -496,7 +496,7 @@ async function joinAsPublisher() {
   });
 }
 
-// ------------------- Remote user events -------------------
+// ------------------- Remote user events (supports many) -------------------
 client.on("user-published", async (user, mediaType) => {
   addLog(`📡 Remote user ${user.uid} published ${mediaType}`);
   try {
@@ -505,18 +505,14 @@ client.on("user-published", async (user, mediaType) => {
 
     let remoteEntry = remoteUsers.get(user.uid);
     if (!remoteEntry && mediaType === "video") {
-      const div = addRemoteVideo(user.uid);
+      addRemoteVideo(user.uid);
       remoteEntry = remoteUsers.get(user.uid);
     }
 
-    if (mediaType === "video") {
-      if (remoteEntry && remoteEntry.div) {
-        user.videoTrack.play(remoteEntry.div.id);
-        remoteEntry.videoTrack = user.videoTrack;
-        addLog(`▶️ Playing video from ${user.uid}`);
-      } else {
-        addLog(`⚠️ No div for user ${user.uid}, cannot play video`);
-      }
+    if (mediaType === "video" && remoteEntry && remoteEntry.div) {
+      user.videoTrack.play(remoteEntry.div.id);
+      remoteEntry.videoTrack = user.videoTrack;
+      addLog(`▶️ Playing video from ${user.uid}`);
     }
 
     if (mediaType === "audio") {
@@ -545,7 +541,6 @@ client.on("user-left", (user) => {
   removeRemoteVideo(user.uid);
 });
 
-// Also handle when we join after others (Agora will emit user-published for existing users)
 client.on("user-joined", (user) => {
   addLog(`👋 New user joined: ${user.uid}`);
 });
