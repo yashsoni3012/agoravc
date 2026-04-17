@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+<!-- <!DOCTYPE html>
 <html>
 <head>
   <title>Agora Live</title>
@@ -151,5 +151,293 @@ async function leaveStream() {
 
 </script>
 
+</body>
+</html> -->
+
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Agora Live - Two‑Way Video Call</title>
+  <style>
+    body { font-family: Arial, sans-serif; padding: 20px; }
+    button { margin: 5px; padding: 8px 16px; font-size: 14px; cursor: pointer; }
+    .video-container {
+      display: flex;
+      gap: 20px;
+      margin-top: 20px;
+      flex-wrap: wrap;
+    }
+    .video-box {
+      background: black;
+      border-radius: 8px;
+      overflow: hidden;
+      position: relative;
+    }
+    .video-box video {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+    .video-label {
+      position: absolute;
+      bottom: 8px;
+      left: 8px;
+      background: rgba(0,0,0,0.6);
+      color: white;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 12px;
+      pointer-events: none;
+    }
+    #local-player { width: 320px; height: 240px; }
+    #remote-videos {
+      display: flex;
+      gap: 20px;
+      flex-wrap: wrap;
+    }
+    .remote-video { width: 320px; height: 240px; }
+    hr { margin: 20px 0; }
+  </style>
+</head>
+<body>
+
+<h2>🎥 Two‑Way Video Call</h2>
+<p><strong>Host:</strong> click "Start Live" → creates a channel.<br>
+<strong>Audience:</strong> click "Join Live" → enter the <strong>exact same channel name</strong> → both can see & hear each other.</p>
+
+<div>
+  <button onclick="startLive()">📡 Start Live (Host)</button>
+  <button onclick="joinLive()">👥 Join Live (Audience)</button>
+  <button onclick="leaveStream()">❌ Leave</button>
+</div>
+
+<hr>
+
+<div class="video-container">
+  <div class="video-box" id="local-player">
+    <div class="video-label">📹 You</div>
+  </div>
+  <div id="remote-videos" class="video-container"></div>
+</div>
+
+<script src="https://download.agora.io/sdk/release/AgoraRTC_N.js"></script>
+
+<script>
+const APP_ID = "5a6591e3ec6b438f9095dfbf7add91ce";
+const API_BASE = "https://celebstalks.pythonanywhere.com/";
+
+let client = AgoraRTC.createClient({ mode: "live", codec: "vp8" });
+let localTracks = [];
+let currentChannel = null;
+let isJoining = false;
+let remoteUsers = new Map(); // map of uid -> div element
+
+// ------------------- Helper: safe join/leave -------------------
+async function safeJoin(callback) {
+  if (isJoining) {
+    console.log("⚠️ Already joining, please wait...");
+    return;
+  }
+  isJoining = true;
+  try {
+    if (client.connectionState !== "DISCONNECTED") {
+      console.log("⚠️ Leaving previous session before new join...");
+      await client.leave();
+      // clear remote videos after leaving
+      clearRemoteVideos();
+    }
+    await callback();
+  } catch (err) {
+    console.error("❌ Error:", err);
+    alert("Action failed: " + err.message);
+  } finally {
+    isJoining = false;
+  }
+}
+
+// clear all remote video divs
+function clearRemoteVideos() {
+  const container = document.getElementById("remote-videos");
+  container.innerHTML = "";
+  remoteUsers.clear();
+}
+
+// create a div for a remote user
+function addRemoteVideo(uid) {
+  const container = document.getElementById("remote-videos");
+  let div = document.createElement("div");
+  div.id = `remote-${uid}`;
+  div.className = "video-box remote-video";
+  div.innerHTML = `<div class="video-label">👤 Remote (UID: ${uid})</div>`;
+  container.appendChild(div);
+  remoteUsers.set(uid, div);
+  return div;
+}
+
+function removeRemoteVideo(uid) {
+  const div = remoteUsers.get(uid);
+  if (div) {
+    div.remove();
+    remoteUsers.delete(uid);
+  }
+}
+
+// ------------------- Host: Start Live -------------------
+async function startLive() {
+  safeJoin(async () => {
+    const res = await fetch(API_BASE + "live_stream_token/", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ influencer_id: 1 })
+    });
+    const data = await res.json();
+    console.log("🎯 Host token data:", data);
+    if (!data.token || !data.channel_name) {
+      alert("Invalid token response from server");
+      return;
+    }
+    currentChannel = data.channel_name;
+
+    // Set role as HOST (allows publishing)
+    await client.setClientRole("host");
+    await client.join(APP_ID, data.channel_name, data.token, data.uid);
+
+    // Create local tracks (camera + mic)
+    const [audioTrack, videoTrack] = await AgoraRTC.createMicrophoneAndCameraTracks();
+    localTracks = [audioTrack, videoTrack];
+
+    // Play local video in the fixed "local-player" div
+    videoTrack.play("local-player");
+
+    // Publish tracks to the channel
+    await client.publish(localTracks);
+    console.log("🎥 Host started live on channel:", currentChannel);
+  });
+}
+
+// ------------------- Audience: Join as a two‑way participant -------------------
+async function joinLive() {
+  const channel = prompt("Enter channel name (the same as Host's channel):");
+  if (!channel) return;
+
+  safeJoin(async () => {
+    // Request token for this user (user_id=2 for audience)
+    const res = await fetch(API_BASE + "join_live_stream/", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user_id: 2, channel_name: channel })
+    });
+    const data = await res.json();
+    console.log("🎯 Audience join data:", data);
+    if (!data.token || !data.channel_name) {
+      alert("Invalid join response from server");
+      return;
+    }
+    currentChannel = data.channel_name;
+
+    // ** CRITICAL: set role to HOST so audience can publish camera/mic **
+    await client.setClientRole("host");
+    await client.join(APP_ID, data.channel_name, data.token, data.uid);
+
+    // Create and publish local tracks (so host sees audience)
+    const [audioTrack, videoTrack] = await AgoraRTC.createMicrophoneAndCameraTracks();
+    localTracks = [audioTrack, videoTrack];
+    videoTrack.play("local-player");  // audience sees themselves
+    await client.publish(localTracks);
+    console.log("👥 Audience joined as host (two‑way) on channel:", currentChannel);
+  });
+}
+
+// ------------------- Remote user events -------------------
+client.on("user-published", async (user, mediaType) => {
+  console.log(`📡 Remote user ${user.uid} published ${mediaType}`);
+  await client.subscribe(user, mediaType);
+
+  // Create video container for this remote user if not exists
+  let remoteDiv = remoteUsers.get(user.uid);
+  if (!remoteDiv && mediaType === "video") {
+    remoteDiv = addRemoteVideo(user.uid);
+  }
+
+  if (mediaType === "video") {
+    // Play remote video in its dedicated div
+    if (remoteDiv) {
+      user.videoTrack.play(remoteDiv.id);
+    } else {
+      console.warn("No remote div found for video");
+    }
+  }
+
+  if (mediaType === "audio") {
+    user.audioTrack.play();
+  }
+});
+
+client.on("user-unpublished", (user, mediaType) => {
+  console.log(`🔇 Remote user ${user.uid} unpublished ${mediaType}`);
+  if (mediaType === "video") {
+    // Optionally stop the track and remove the div
+    if (user.videoTrack) {
+      user.videoTrack.stop();
+    }
+    removeRemoteVideo(user.uid);
+  }
+});
+
+// Also handle remote user leaving the channel
+client.on("user-left", (user) => {
+  console.log(`🚪 Remote user ${user.uid} left`);
+  removeRemoteVideo(user.uid);
+});
+
+// ------------------- Leave Stream (clean up everything) -------------------
+async function leaveStream() {
+  try {
+    // Stop and close local tracks
+    if (localTracks.length) {
+      localTracks.forEach(track => {
+        if (track) {
+          track.stop();
+          track.close();
+        }
+      });
+      localTracks = [];
+    }
+
+    // Leave the channel
+    if (client.connectionState !== "DISCONNECTED") {
+      await client.leave();
+    }
+
+    // Clear remote video containers
+    clearRemoteVideos();
+
+    // Clear local video element content
+    const localDiv = document.getElementById("local-player");
+    if (localDiv) {
+      // The video element inside will be cleared by track.stop(), but we also remove any extra innerHTML
+      // Just ensure that any leftover video element is removed
+      const oldVideo = localDiv.querySelector("video");
+      if (oldVideo) oldVideo.remove();
+      // re-add the label if needed (it's static in HTML, so fine)
+    }
+
+    currentChannel = null;
+    console.log("✅ Left stream successfully");
+  } catch (err) {
+    console.error("Leave error:", err);
+  }
+}
+
+// Optional: Handle page unload to leave gracefully
+window.addEventListener("beforeunload", () => {
+  if (localTracks.length) {
+    localTracks.forEach(track => track.close());
+  }
+  if (client && client.connectionState !== "DISCONNECTED") {
+    client.leave();
+  }
+});
+</script>
 </body>
 </html>
