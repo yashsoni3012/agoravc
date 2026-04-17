@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Agora Live</title>
+</head>
+<body>
+
+<button onclick="startLive()">Start Live (Host)</button>
+<button onclick="joinLive()">Join Live (Audience)</button>
+<button onclick="leaveStream()">Leave</button>
+
+<div id="local-player" style="width:300px;height:200px;background:black;"></div>
+<div id="remote-player" style="width:300px;height:200px;background:black;"></div>
+
+<script src="https://download.agora.io/sdk/release/AgoraRTC_N.js"></script>
+
+<script>
+const APP_ID = "5a6591e3ec6b438f9095dfbf7add91ce";
+const API_BASE = "https://celebstalks.pythonanywhere.com/";
+
+let client = AgoraRTC.createClient({ mode: "live", codec: "vp8" });
+let localTracks = [];
+let currentChannel = null;
+let isJoining = false;
+
+// 🔒 Prevent multiple joins
+async function safeJoin(callback) {
+  if (isJoining) {
+    console.log("⚠️ Already joining...");
+    return;
+  }
+
+  isJoining = true;
+
+  try {
+    // If already connected → leave first
+    if (client.connectionState !== "DISCONNECTED") {
+      console.log("⚠️ Leaving previous session...");
+      await client.leave();
+    }
+
+    await callback();
+
+  } catch (err) {
+    console.error("❌ Error:", err);
+  } finally {
+    isJoining = false;
+  }
+}
+
+// 🔴 Start Live (Host)
+async function startLive() {
+  safeJoin(async () => {
+
+    const res = await fetch(API_BASE + "live_stream_token/", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ influencer_id: 1 })
+    });
+
+    const data = await res.json();
+    console.log("🎯 Token Data:", data);
+
+    if (!data.token || !data.channel_name) {
+      alert("Invalid token response");
+      return;
+    }
+
+    currentChannel = data.channel_name;
+
+    await client.setClientRole("host");
+    await client.join(APP_ID, data.channel_name, data.token, data.uid);
+
+    const [audioTrack, videoTrack] = await AgoraRTC.createMicrophoneAndCameraTracks();
+
+    localTracks = [audioTrack, videoTrack];
+
+    videoTrack.play("local-player");
+
+    await client.publish(localTracks);
+
+    console.log("🎥 Live started");
+
+  });
+}
+
+// 👀 Join Live (Audience)
+async function joinLive() {
+  safeJoin(async () => {
+
+    const channel = prompt("Enter Channel Name");
+    if (!channel) return;
+
+    const res = await fetch(API_BASE + "join_live_stream/", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user_id: 2, channel_name: channel })
+    });
+
+    const data = await res.json();
+    console.log("🎯 Join Data:", data);
+
+    if (!data.token || !data.channel_name) {
+      alert("Invalid join response");
+      return;
+    }
+
+    await client.setClientRole("audience");
+    await client.join(APP_ID, data.channel_name, data.token, data.uid);
+
+    console.log("👀 Joined live");
+
+  });
+}
+
+// 🎥 Listen to remote stream
+client.on("user-published", async (user, mediaType) => {
+  await client.subscribe(user, mediaType);
+
+  if (mediaType === "video") {
+    user.videoTrack.play("remote-player");
+  }
+
+  if (mediaType === "audio") {
+    user.audioTrack.play();
+  }
+});
+
+// ❌ Leave Stream
+async function leaveStream() {
+  try {
+    localTracks.forEach(track => {
+      if (track) {
+        track.stop();
+        track.close();
+      }
+    });
+
+    localTracks = [];
+
+    if (client.connectionState !== "DISCONNECTED") {
+      await client.leave();
+    }
+
+    console.log("✅ Left stream");
+
+  } catch (err) {
+    console.error("Leave error:", err);
+  }
+}
+
+</script>
+
+</body>
+</html>
